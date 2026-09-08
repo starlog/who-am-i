@@ -13,8 +13,11 @@ Docker Manager 뒤(oauth2-proxy)에서 **로그인한 사용자가 누구로 보
 |---|---|
 | `/` | 사용자 정보와 도착한 헤더 원문을 표시 (서버 컴포넌트) |
 | `/api/me` | 같은 내용을 JSON 으로 반환 |
+| `/api/hello` | REST API 예시 (스캐폴딩. 앱 기능과 무관하므로 필요 없으면 지워도 됩니다) |
 | `/health` | 헬스체크 |
-| `src/lib/auth.ts` | 헤더 파싱. 앱에서 사용자 정보가 필요하면 여기만 쓰면 됩니다 |
+| `src/lib/auth.ts` | 헤더 파싱. 앱에서 사용자 정보가 **표시용으로** 필요하면 여기만 쓰면 됩니다 |
+| `src/lib/api.ts` | 클라이언트에서 자체 API 를 부를 때 서브패스를 붙이는 `apiUrl` / `apiFetch` |
+| `src/lib/base-path.ts` | basePath 정규화. `next.config.ts` 와 `api.ts` 가 함께 씁니다 |
 
 ```ts
 import { displayName, getProxyUser } from '@/lib/auth';
@@ -22,6 +25,9 @@ import { displayName, getProxyUser } from '@/lib/auth';
 const user = await getProxyUser();   // 서버 컴포넌트 / 라우트 핸들러
 if (user) console.log(user.email, displayName(user));
 ```
+
+> **이 값으로 권한을 판정하지 마세요.** `getProxyUser()` 가 돌려주는 이메일·그룹·프로필은
+> 서명이 검증되지 않은 값입니다. 아래 "주의" 절을 먼저 읽으세요.
 
 ## 전달되는 헤더
 
@@ -73,19 +79,98 @@ curl -s localhost:3000/api/me \
   -H 'X-Auth-Request-Groups: dba,dev'
 ```
 
+서브 경로로 빌드한 경우에는 경로 앞에 prefix 를 붙이세요
+(`curl -s localhost:3000/c/who-am-i/api/me ...`).
+
 ## 주의: 이 헤더는 표시용으로만 신뢰하세요
 
 nginx 가 `proxy_set_header` 로 매 요청 값을 덮어쓰므로 **프록시를 거친 요청에서는 위조할 수
 없습니다.** 반대로 컨테이너 포트(3000)에 직접 닿을 수 있으면 누구나 임의의 이메일과 id_token 을
-보낼 수 있습니다. `src/lib/auth.ts` 는 id_token 서명을 검증하지 않으므로(프록시 경로를 신뢰),
-권한 판정에 쓰려면 컨테이너 포트를 외부에 노출하지 않거나 JWKS 로 서명을 검증해야 합니다.
+보낼 수 있습니다. `src/lib/auth.ts` 는 id_token 서명을 검증하지 않습니다(프록시 경로를 신뢰).
 
-## 실행
+여기서 "직접 닿을 수 있는 범위"는 **인터넷 경계가 아니라 도커 네트워크 경계**입니다.
+포트를 publish 하지 않아도 같은 브리지 네트워크의 다른 컨테이너는 3000 포트에 그대로 도달하고,
+standalone 서버는 `0.0.0.0` 에 바인딩됩니다. 즉 같은 Docker Manager 에 올라간 이웃 앱이 침해되거나
+SSRF 를 가지면 nginx 를 우회해 임의의 신원으로 이 앱에 접근할 수 있습니다.
+
+따라서 **권한 판정에는 쓰지 마세요.** 쓰려면 둘 중 하나가 필요합니다.
+
+1. nginx 가 넣는 공유 비밀 헤더로 프록시 경유를 강제 — 직접 접근 자체를 막으므로 근본 해결에 가깝습니다.
+2. `jose` 등으로 JWKS 서명 + `iss` / `aud` / `exp` 검증.
+
+참고로 프로필 사진 URL 은 서명되지 않은 토큰에서 오므로, `safePictureUrl()` 이 https +
+`googleusercontent.com` 호스트로 제한합니다. 다른 provider 를 쓰면 사진이 표시되지 않습니다.
+
+## 설치 및 실행
+
+### 사전 요구사항
+
+- Node.js **20.9 이상** (`package.json` 의 `engines` 참고. 개발은 22.x 에서 확인했습니다)
+- DB 없음 — 앱은 요청 헤더만 읽는 stateless 구조입니다
+
+### 설치
 
 ```bash
-npm run dev          # 개발 서버
+npm ci        # lock 파일이 있으므로 ci 권장
+```
+
+### 환경변수
+
+`.env.example` 을 복사해 `.env` 를 만드세요.
+
+```bash
+cp .env.example .env
+```
+
+| 변수 | 시점 | 설명 |
+|---|---|---|
+| `NEXT_PUBLIC_BASE_PATH` | **빌드타임** | 서브 경로 prefix (예: `/c/who-am-i`). 루트 배포면 비워 둡니다 |
+| `PORT` | 런타임 | standalone 서버 포트 (기본 3000) |
+| `HOSTNAME` | 런타임 | 바인딩 주소. 컨테이너에서는 `0.0.0.0` 이 필요합니다 |
+
+### 실행
+
+```bash
+npm run dev          # 개발 서버 → http://localhost:3000
 npm run build        # standalone 빌드 (.next/standalone)
 npm start
 ```
 
-서브 경로(`/c/who-am-i`) 배포 시에는 빌드·런타임 양쪽에 `NEXT_PUBLIC_BASE_PATH` 를 지정합니다.
+## 서브 경로 배포
+
+`NEXT_PUBLIC_BASE_PATH` 는 **`next build` 이전에** 지정해야 합니다.
+`output: 'standalone'` 산출물은 `next.config` 를 `server.js` 안에 통째로 직렬화하므로,
+런타임에만 넣으면 반영되지 않고 정적 자산이 전부 404 가 됩니다.
+
+```bash
+NEXT_PUBLIC_BASE_PATH=/c/who-am-i npm run build
+```
+
+값에 앞/뒤 슬래시가 잘못 붙어도(`c/who-am-i`, `/c/who-am-i/`) `src/lib/base-path.ts` 가 보정합니다.
+
+서브 경로로 빌드하면 **헬스체크를 포함한 모든 경로 앞에 prefix 가 붙습니다.**
+
+```bash
+curl -s localhost:3000/c/who-am-i/health     # 200
+curl -s localhost:3000/health                # 404 (정상)
+```
+
+Docker Manager 는 헬스체크 시 basePath 를 자동으로 붙이므로 배포 경로에서는 문제가 없습니다.
+
+### standalone 실행 시 반드시 함께 복사할 것
+
+`.next/standalone` 에는 `.next/static` 과 `public/` 이 **포함되지 않습니다.**
+복사하지 않으면 HTML 은 뜨지만 CSS·폰트가 전부 404 입니다.
+
+```bash
+cp -r .next/static .next/standalone/.next/static
+cp -r public .next/standalone/public
+```
+
+## 알려진 이슈
+
+- **id_token 서명을 검증하지 않습니다.** 표시 전용으로만 쓰세요 (위 "주의" 절 참고).
+- 만료된(`exp` 지난) id_token 의 프로필도 그대로 표시됩니다. 프록시 설정 점검이 목적이라 의도적으로 두었습니다.
+- Docker Manager 자동 생성 Dockerfile 에서 확인이 필요한 항목이 있습니다 —
+  `ENV HOSTNAME=0.0.0.0`, `.next/static` · `public` 복사, 빌드 전 `NEXT_PUBLIC_BASE_PATH` 주입.
+  자세한 내용은 [`IMPROVEMENTS.md`](./IMPROVEMENTS.md) 6장을 보세요.

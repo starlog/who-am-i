@@ -1,3 +1,4 @@
+import { apiUrl } from '@/lib/api';
 import { displayName, getAuthHeaders, getProxyUser } from '@/lib/auth';
 
 /**
@@ -28,12 +29,15 @@ export default async function Home() {
               <div className="flex items-center gap-4">
                 {user.profile?.picture && (
                   // 외부(googleusercontent) 이미지라 next/image 는 도메인 설정이 필요하다.
+                  // next/image 로 바꾸면 서버가 원본 URL 을 fetch 하므로 SSRF 표면이 생긴다.
+                  // URL 자체는 auth.ts 의 safePictureUrl() 이 https + googleusercontent 로 제한한다.
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={user.profile.picture}
                     alt=""
                     width={48}
                     height={48}
+                    referrerPolicy="no-referrer"
                     className="size-12 shrink-0 rounded-full border border-black/10 dark:border-white/15"
                   />
                 )}
@@ -91,7 +95,7 @@ export default async function Home() {
 
           <p className="mt-5 text-xs leading-relaxed text-zinc-500">
             Cookie · Authorization(id_token) 헤더는 값 자체가 자격증명이므로 표시하지 않습니다.
-            JSON 이 필요하면 <code className="font-mono">/api/me</code> 를 호출하세요.
+            JSON 이 필요하면 <code className="font-mono">{apiUrl('/api/me')}</code> 를 호출하세요.
           </p>
         </section>
       </main>
