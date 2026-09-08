@@ -18,6 +18,7 @@ Docker Manager 뒤(oauth2-proxy)에서 **로그인한 사용자가 누구로 보
 | `src/lib/auth.ts` | 헤더 파싱. 앱에서 사용자 정보가 **표시용으로** 필요하면 여기만 쓰면 됩니다 |
 | `src/lib/api.ts` | 클라이언트에서 자체 API 를 부를 때 서브패스를 붙이는 `apiUrl` / `apiFetch` |
 | `src/lib/base-path.ts` | basePath 정규화. `next.config.ts` 와 `api.ts` 가 함께 씁니다 |
+| `scripts/prepare-standalone.mjs` | 빌드 후 standalone 산출물 정리(정적 자산 복사 · HOSTNAME 보정) |
 
 ```ts
 import { displayName, getProxyUser } from '@/lib/auth';
@@ -157,20 +158,29 @@ curl -s localhost:3000/health                # 404 (정상)
 
 Docker Manager 는 헬스체크 시 basePath 를 자동으로 붙이므로 배포 경로에서는 문제가 없습니다.
 
-### standalone 실행 시 반드시 함께 복사할 것
+### standalone 산출물은 빌드 시 자동으로 정리됩니다
 
-`.next/standalone` 에는 `.next/static` 과 `public/` 이 **포함되지 않습니다.**
-복사하지 않으면 HTML 은 뜨지만 CSS·폰트가 전부 404 입니다.
+`npm run build` 는 `postbuild` 로 `scripts/prepare-standalone.mjs` 를 실행해 두 가지를 처리합니다.
+따라서 `.next/standalone` 만 복사하면 그대로 실행됩니다.
+
+1. **`.next/static` 과 `public/` 복사** — standalone 산출물에는 이 둘이 포함되지 않습니다.
+   복사하지 않으면 HTML 은 뜨지만 CSS·폰트가 전부 404 입니다.
+2. **`HOSTNAME` 보정** — standalone 의 `server.js` 는 `process.env.HOSTNAME || '0.0.0.0'` 으로
+   바인딩 주소를 정하는데, Docker 는 컨테이너 안에 `HOSTNAME` 을 **컨테이너 ID** 로 자동 주입합니다.
+   그대로 두면 서버가 `0.0.0.0` 이 아니라 eth0 IP 하나에만 바인딩되어(또는 이름이 안 풀려 기동 실패)
+   컨테이너 내부 `localhost:3000` 접근이 실패합니다. IP·`localhost` 가 아닌 값이면 `0.0.0.0` 으로 되돌립니다.
+   `HOSTNAME=127.0.0.1` 처럼 **의도적으로 IP 를 지정한 경우는 그대로 존중**합니다.
 
 ```bash
-cp -r .next/static .next/standalone/.next/static
-cp -r public .next/standalone/public
+npm run build
+node .next/standalone/server.js   # 추가 복사 없이 바로 실행
 ```
 
 ## 알려진 이슈
 
 - **id_token 서명을 검증하지 않습니다.** 표시 전용으로만 쓰세요 (위 "주의" 절 참고).
 - 만료된(`exp` 지난) id_token 의 프로필도 그대로 표시됩니다. 프록시 설정 점검이 목적이라 의도적으로 두었습니다.
-- Docker Manager 자동 생성 Dockerfile 에서 확인이 필요한 항목이 있습니다 —
-  `ENV HOSTNAME=0.0.0.0`, `.next/static` · `public` 복사, 빌드 전 `NEXT_PUBLIC_BASE_PATH` 주입.
+- Docker Manager 자동 생성 Dockerfile 에서 **빌드 전에** `NEXT_PUBLIC_BASE_PATH` 를 `ENV` 로
+  설정하는지 확인이 필요합니다. basePath 는 빌드 시점에 확정되므로 런타임 주입은 반영되지 않습니다.
   자세한 내용은 [`IMPROVEMENTS.md`](./IMPROVEMENTS.md) 6장을 보세요.
+  (`HOSTNAME` 과 정적 자산 복사는 `postbuild` 스크립트가 처리하므로 Dockerfile 쪽 조치가 필요 없습니다.)

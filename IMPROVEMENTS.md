@@ -106,18 +106,19 @@
 
 ## 6. 수동 조치 필요 항목
 
-### 6-1. Docker Manager 자동 생성 Dockerfile 에서 확인해야 할 3가지 (승인 전)
+### 6-1. Docker Manager 자동 생성 Dockerfile 에서 확인해야 할 항목 (승인 전)
 
 Dockerfile·`.github/workflows/deploy.yml`·`.dockerignore` 는 워크플로우 지침에 따라 직접 만들지 않았습니다.
-Docker Manager 가 생성한 뒤 아래를 확인하세요.
 
-1. **`ENV HOSTNAME=0.0.0.0`** — standalone `server.js` 는 `process.env.HOSTNAME || '0.0.0.0'` 으로 바인딩합니다.
-   Docker 는 컨테이너 안에 `HOSTNAME` 을 **컨테이너 ID 로 자동 주입**하므로, 이 ENV 가 없으면 서버가
-   `0.0.0.0` 이 아니라 eth0 IP 하나에만 바인딩됩니다. 컨테이너 내부 `localhost:3000` 접근(HEALTHCHECK 등)이 전부 실패합니다.
-2. **`COPY .next/static` 및 `COPY public`** — standalone 산출물에는 이 둘이 **포함되지 않습니다.**
-   실측으로 재현했습니다: 복사 전 CSS 요청이 404, 복사 후 200. 누락 시 HTML 은 뜨지만 스타일이 전부 깨집니다.
+> **1·2번은 후속 작업에서 저장소 안에서 해결했습니다** (아래 9장 참조).
+> `scripts/prepare-standalone.mjs` 가 `postbuild` 로 실행되어 Dockerfile 이 무엇을 하든
+> `.next/standalone` 만 복사하면 동작합니다. Dockerfile 쪽 조치가 더 이상 필요 없습니다.
+
+1. ~~**`ENV HOSTNAME=0.0.0.0`**~~ — **해결됨.** postbuild 가 `server.js` 에 보정 코드를 넣습니다.
+2. ~~**`COPY .next/static` 및 `COPY public`**~~ — **해결됨.** postbuild 가 복사합니다.
 3. **`ENV NEXT_PUBLIC_BASE_PATH=/c/who-am-i` 가 `RUN npm run build` 보다 먼저** 나오는지 —
-   basePath 는 `server.js` 에 직렬화되어 빌드 시점에 확정됩니다. 런타임 주입만으로는 반영되지 않습니다.
+   **여전히 확인이 필요합니다.** basePath 는 `server.js` 에 직렬화되어 빌드 시점에 확정됩니다.
+   런타임 주입만으로는 반영되지 않으며, 이것만은 앱 안에서 해결할 수 없습니다.
 4. (참고) **`HEALTHCHECK` 경로** — basePath 를 켜면 `/health` 는 404 이고 `/c/who-am-i/health` 가 200 입니다.
    Docker Manager 는 외부 헬스체크 시 basePath 를 자동 프리픽스하므로 정상이지만,
    Dockerfile 내부 `HEALTHCHECK` 가 접두 없는 `/health` 를 쓰면 컨테이너가 영구 unhealthy 가 됩니다.
@@ -212,3 +213,43 @@ git checkout be5783c -- .   # 원본으로 복구
 ```
 
 원본 커밋 `be5783c` 는 이 워크플로우 실행 직전 상태이며, 원격(`origin/main`)에도 푸시되어 있습니다.
+
+
+---
+
+## 9. 후속 수정 — standalone 산출물 자체 보정
+
+6-1 의 1·2번은 "Dockerfile 에서 확인하세요"로 남겨 두었으나, 사용자 요청에 따라 **저장소 안에서 해결**했습니다.
+워크플로우 문서가 Dockerfile 직접 생성을 금지하므로, Dockerfile 을 만드는 대신 빌드 산출물을 올바르게 만드는
+방향을 택했습니다.
+
+### 변경 내용
+
+| 파일 | 내용 |
+|---|---|
+| `scripts/prepare-standalone.mjs` (신규) | `postbuild` 로 실행. 정적 자산 복사 + `HOSTNAME` 보정 |
+| `package.json` | `"postbuild": "node scripts/prepare-standalone.mjs"` 추가, `"start"` 에 `-H 0.0.0.0` 명시 |
+
+`.next/standalone/server.js` 맨 앞에 아래 판정을 삽입합니다. `HOSTNAME` 이 IPv4·IPv6·`localhost` 가
+아니면(= 컨테이너 ID 등 바인딩 주소로 쓸 수 없는 값이면) `0.0.0.0` 으로 되돌립니다.
+`HOSTNAME=127.0.0.1` 처럼 **의도적으로 IP 를 지정한 경우는 그대로 존중**합니다.
+
+### 검증 결과 (컨테이너 ID 시뮬레이션: `HOSTNAME=a1b2c3d4e5f6`)
+
+| 항목 | 수정 전 | 수정 후 |
+|---|---|---|
+| 서버 기동 | `Error: getaddrinfo ENOTFOUND a1b2c3d4e5f6` — 기동 실패 | `Network: http://0.0.0.0:3405` |
+| `127.0.0.1` 접근 | 실패 | **200** |
+| LAN IP 접근 | 실패 | **200** |
+| CSS (`_next/static`) | 404 | **200** (추가 복사 없이) |
+| 서브패스 빌드 `/c/who-am-i/health` | — | **200** |
+| 서브패스 빌드 CSS | — | **200** |
+
+> 실제 Docker 환경에서는 컨테이너 ID 가 `/etc/hosts` 를 통해 eth0 IP 로 해석되므로 기동 실패 대신
+> **eth0 IP 한 곳에만 바인딩**됩니다. 어느 쪽이든 컨테이너 내부 `localhost:3000` 접근은 실패합니다.
+
+### 멱등성
+
+같은 `.next` 위에서 `npm run build` 를 반복해도 패치 블록은 1개만 유지되고(표식으로 판별),
+`fs.cp({ force: true })` 를 써서 `static/static` 같은 중첩 디렉토리가 생기지 않는 것을 확인했습니다.
+`output: 'standalone'` 이 아닌 빌드에서는 아무 것도 하지 않고 조용히 건너뜁니다.
