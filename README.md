@@ -106,7 +106,7 @@ SSRF 를 가지면 nginx 를 우회해 임의의 신원으로 이 앱에 접근�
 
 ### 사전 요구사항
 
-- Node.js **20.9 이상** (`package.json` 의 `engines` 참고. 개발은 22.x 에서 확인했습니다)
+- Node.js **24.22.1 이상** (`package.json` 의 `engines`, `.nvmrc` 참고)
 - DB 없음 — 앱은 요청 헤더만 읽는 stateless 구조입니다
 
 ### 설치
