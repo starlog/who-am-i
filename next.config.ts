@@ -2,10 +2,16 @@ import type { NextConfig } from 'next';
 
 import { normalizeBasePath } from './src/lib/base-path';
 
+// 빈 문자열이면 basePath 키 자체를 넘기지 않는다(Next 가 undefined 키는 건너뛴다).
+const basePath = normalizeBasePath(process.env.NEXT_PUBLIC_BASE_PATH) || undefined;
+
 const nextConfig: NextConfig = {
   output: 'standalone',
-  // 빈 문자열이면 basePath 키 자체를 넘기지 않는다(Next 가 undefined 키는 건너뛴다).
-  basePath: normalizeBasePath(process.env.NEXT_PUBLIC_BASE_PATH) || undefined,
+  basePath,
+  // Docker Manager 가 넣었던 next.config.js 와 같은 동작. 서브패스 배포일 때만
+  // 끝 슬래시를 붙인다. (.js 가 있으면 Next 가 이 파일보다 먼저 읽어 아래 보안
+  // 헤더가 통째로 무시됐으므로, .js 는 지우고 설정을 여기로 합쳤다.)
+  trailingSlash: basePath !== undefined,
   // 프레임워크 정보를 굳이 응답에 실을 이유가 없다.
   poweredByHeader: false,
   async headers() {

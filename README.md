@@ -151,9 +151,13 @@ NEXT_PUBLIC_BASE_PATH=/c/who-am-i npm run build
 
 서브 경로로 빌드하면 **헬스체크를 포함한 모든 경로 앞에 prefix 가 붙습니다.**
 
+서브 경로 빌드에서는 `trailingSlash` 도 함께 켜지므로, 끝 슬래시가 없는 요청은
+같은 경로 + `/` 로 308 리다이렉트됩니다(루트 배포에서는 꺼져 있습니다).
+
 ```bash
-curl -s localhost:3000/c/who-am-i/health     # 200
-curl -s localhost:3000/health                # 404 (정상)
+curl -s localhost:3000/c/who-am-i/health/    # 200
+curl -s localhost:3000/c/who-am-i/health     # 308 → /c/who-am-i/health/
+curl -sL localhost:3000/health               # 404 (정상)
 ```
 
 Docker Manager 는 헬스체크 시 basePath 를 자동으로 붙이므로 배포 경로에서는 문제가 없습니다.
