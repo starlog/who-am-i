@@ -1,13 +1,17 @@
 /**
- * 리버스 프록시(oauth2-proxy)가 넘겨준 로그인 사용자 정보를 읽는다.
+ * 리버스 프록시가 넘겨준 로그인 사용자 정보를 읽는다.
  *
- * 이 앱은 Docker Manager 아래 /c/who-am-i 로 배포되고, 그 앞단은
+ * 이 앱은 Docker Manager(v2) 아래 /c/who-am-i 로 배포되고, 그 앞단은
  *
- *   브라우저 → nginx (auth_request /_oauth) → oauth2-proxy → 이 앱
+ *   브라우저 → nginx (auth_request) → docker-manager /api/auth/check (세션 확인) → 이 앱
  *
- * 구조다. nginx 는 oauth2-proxy 의 X-Auth-Request-* 응답 헤더를 회수해
- * X-Forwarded-Email / X-Forwarded-User 로 바꿔 프록시한다. 즉 이 앱은
- * Google OAuth 를 직접 수행하지 않고, "이미 인증된 결과"를 헤더로만 받는다.
+ * 구조다. nginx 는 /api/auth/check 의 X-Auth-Request-* 응답 헤더를 회수해
+ * X-Forwarded-Email / X-Forwarded-User 로 바꿔 프록시한다. 프로젝트에
+ * pass_identity 가 켜져 있으면 docker-manager 가 서명한 단기 신원 토큰(JWT)도
+ * X-Forwarded-Identity 로 넘어온다. 즉 이 앱은 로그인을 직접 수행하지 않고,
+ * "이미 인증된 결과"를 헤더로만 받는다.
+ *
+ * v1 의 oauth2-proxy 구성(Authorization: Bearer <Google id_token>)도 계속 읽는다.
  *
  * ── 신뢰 범위 ──────────────────────────────────────────────────────────
  * 이 헤더들은 nginx 가 proxy_set_header 로 매 요청 덮어쓰기 때문에 프록시를
@@ -23,8 +27,9 @@
  * 따라서
  *   - 표시(누가 로그인했는지)에는 그대로 써도 된다. 이 앱의 용도가 그것이다.
  *   - **권한 판정에는 쓰면 안 된다.** 쓰려면 (a) nginx 가 넣는 공유 비밀
- *     헤더로 프록시 경유를 강제하거나, (b) JWKS 로 id_token 서명을 검증해야
- *     한다. 아래 decodeJwtPayload 는 서명을 검증하지 않는다.
+ *     헤더로 프록시 경유를 강제하거나, (b) JWKS 로 토큰 서명을 검증해야
+ *     한다(docker-manager 의 공개키: {publicUrl}/.well-known/jwks.json).
+ *     아래 decodeJwtPayload 는 서명을 검증하지 않는다.
  */
 
 import { headers } from 'next/headers';
@@ -35,47 +40,77 @@ const MAX_FIELD_LENGTH = 256;
 /** groups 헤더에서 받아들일 최대 그룹 수. */
 const MAX_GROUPS = 64;
 
-/** Google id_token 의 프로필 클레임. profile 스코프가 있어야 채워진다. */
-export type GoogleProfile = {
-  /** 구글 계정 표시 이름. 이메일 계열 헤더로는 절대 오지 않는 값이다. */
+/** 토큰이 어느 헤더 계열에서 왔는지. 클레임의 의미(sub 등)가 출처마다 다르다. */
+export type ProfileSource = 'docker-manager' | 'id_token';
+
+/**
+ * 신원 토큰의 프로필 클레임.
+ *
+ * - docker-manager: X-Forwarded-Identity (pass_identity=1). name · picture · role · sub 를 담는다.
+ * - id_token      : v1 oauth2-proxy 의 Google id_token. profile 스코프가 있어야 채워진다.
+ */
+export type IdentityProfile = {
+  source: ProfileSource;
+  /** 표시 이름. */
   name: string | null;
+  /** Google id_token 에만 있다. */
   givenName: string | null;
+  /** Google id_token 에만 있다. */
   familyName: string | null;
   picture: string | null;
-  /** 구글 계정 고유 ID(sub). 이메일이 바뀌어도 유지된다. */
+  /** Docker Manager 역할(admin 등). docker-manager 토큰에만 있다. */
+  role: string | null;
+  /**
+   * sub. docker-manager 토큰이면 Docker Manager 사용자 ID,
+   * Google id_token 이면 구글 계정 고유 ID 다.
+   */
   subject: string | null;
+  /** 토큰 발급자(iss). */
+  issuer: string | null;
+  /** 토큰 대상(aud). docker-manager 토큰이면 {publicUrl}/c/{project}. */
+  audience: string | null;
+  /** 만료 시각(exp, ISO 8601). 이 값이 지났어도 그대로 표시한다. */
+  expiresAt: string | null;
 };
+
+/** @deprecated IdentityProfile 을 쓴다. */
+export type GoogleProfile = IdentityProfile;
 
 /** 프록시가 전달한 로그인 사용자. */
 export type ProxyUser = {
   /** 구글 계정 이메일. 프록시가 항상 넘겨주는 유일한 식별자다. */
   email: string;
-  /** 표시용 사용자 값. Google provider 에서는 이름이 아니라 sub(고유 ID)다. */
+  /**
+   * 표시용 사용자 값. Docker Manager v2 에서는 사용자 이름이고,
+   * v1 oauth2-proxy 의 Google provider 에서는 이름이 아니라 sub(고유 ID)다.
+   */
   user: string | null;
   /** oauth2-proxy 의 preferred_username 클레임(설정에 따라 없을 수 있다). */
   preferredUsername: string | null;
   /** 그룹 목록(설정에 따라 비어 있을 수 있다). */
   groups: string[];
   /**
-   * id_token 에서 꺼낸 프로필. oauth2-proxy 에 set-authorization-header 가
-   * 켜져 있고 nginx 가 그 값을 넘겨줄 때만 채워진다(README 참고).
+   * 신원 토큰에서 꺼낸 프로필. Docker Manager 프로젝트에 pass_identity 가
+   * 켜져 있을 때(또는 v1 oauth2-proxy 가 id_token 을 넘길 때)만 채워진다(README 참고).
    */
-  profile: GoogleProfile | null;
+  profile: IdentityProfile | null;
 };
 
 /**
  * 읽을 헤더 이름. 앞쪽이 우선한다.
  *
  * X-Forwarded-*   : Docker Manager 의 nginx 가 만들어 주는 이름(정상 경로).
- * X-Auth-Request-*: oauth2-proxy 원본 이름. nginx 설정이 바뀌어 원본이 그대로
- *                   전달되는 경우에도 동작하도록 함께 읽는다.
+ * X-Auth-Request-*: 인증 게이트(/api/auth/check · oauth2-proxy) 원본 이름. nginx
+ *                   설정이 바뀌어 원본이 그대로 전달되는 경우에도 동작하도록 함께 읽는다.
  */
 const HEADER_NAMES = {
   email: ['x-forwarded-email', 'x-auth-request-email'],
   user: ['x-forwarded-user', 'x-auth-request-user'],
   preferredUsername: ['x-forwarded-preferred-username', 'x-auth-request-preferred-username'],
   groups: ['x-forwarded-groups', 'x-auth-request-groups'],
-  /** id_token 이 실려 오는 헤더. 값 자체는 토큰이므로 화면에 찍지 않는다. */
+  /** Docker Manager 가 서명한 신원 토큰. 값 자체는 토큰이므로 화면에 찍지 않는다. */
+  identity: ['x-forwarded-identity', 'x-auth-request-identity'],
+  /** v1 oauth2-proxy 의 Google id_token 이 실려 오는 헤더. 역시 화면에 찍지 않는다. */
   idToken: ['x-forwarded-id-token', 'x-auth-request-id-token', 'authorization'],
 } as const;
 
@@ -88,6 +123,7 @@ const HEADER_NAMES = {
  * 화면에 노출되므로, allowlist 위에 denylist 를 한 겹 더 둔다.
  */
 const SECRET_HEADER_NAMES: ReadonlySet<string> = new Set<string>([
+  ...HEADER_NAMES.identity,
   ...HEADER_NAMES.idToken,
   'cookie',
   'set-cookie',
@@ -97,7 +133,7 @@ const SECRET_HEADER_NAMES: ReadonlySet<string> = new Set<string>([
 
 /**
  * 화면에 덤프해도 되는 인증 관련 헤더.
- * id_token / Cookie 계열은 값이 곧 자격증명이므로 의도적으로 뺐다.
+ * 신원 토큰 / id_token / Cookie 계열은 값이 곧 자격증명이므로 의도적으로 뺐다.
  */
 export const AUTH_HEADER_NAMES: readonly string[] = [
   ...HEADER_NAMES.email,
@@ -153,11 +189,11 @@ function str(value: unknown): string | null {
 /**
  * 프로필 사진 URL 을 검증한다.
  *
- * picture 는 서명을 검증하지 않은 id_token 에서 온 값이라 임의의 URL 이 들어올
+ * picture 는 서명을 검증하지 않은 토큰에서 온 값이라 임의의 URL 이 들어올
  * 수 있다. 그대로 <img src> 에 넣으면 React 가 <link rel="preload"> 까지 만들어
  * 페이지를 여는 것만으로 외부 호스트에 요청이 나가고, 열람자의 IP 와
- * User-Agent 가 새어 나간다. 이 앱은 Google provider 전용이므로 https +
- * googleusercontent 호스트로 제한한다.
+ * User-Agent 가 새어 나간다. 그래서 https + googleusercontent 호스트로 제한한다
+ * (Google 로그인 사용자만 사진이 보이고, Entra·비밀번호 로그인은 사진이 없다).
  */
 function safePictureUrl(value: unknown): string | null {
   const raw = str(value);
@@ -179,8 +215,8 @@ function safePictureUrl(value: unknown): string | null {
 /**
  * JWT 페이로드를 읽는다. 서명은 검증하지 않는다.
  *
- * 검증 없이 읽어도 되는 이유는 이 토큰이 사용자가 아니라 oauth2-proxy 로부터
- * 프록시 경로로만 도착하기 때문이다(사용자는 이 헤더를 넣을 수 없다).
+ * 검증 없이 읽어도 되는 이유는 이 토큰이 사용자가 아니라 인증 게이트로부터
+ * 프록시 경로로만 도착하기 때문이다(nginx 가 매 요청 덮어쓰므로 사용자는 이 헤더를 넣을 수 없다).
  * 반대로 말하면 도커 네트워크 안에서 컨테이너 포트에 닿을 수 있으면 이 값도
  * 신뢰할 수 없다. 표시 용도로만 쓰고, 권한 판정에 쓰려면 JWKS 로 서명을
  * 검증해야 한다(파일 상단 "신뢰 범위" 참고).
@@ -235,9 +271,30 @@ function warn(reason: string, detail?: string): void {
   );
 }
 
-/** Authorization: Bearer <id_token> 또는 id_token 헤더에서 프로필을 뽑는다. */
-function readProfile(source: Headers): GoogleProfile | null {
-  const raw = first(source, HEADER_NAMES.idToken);
+/** aud 는 문자열 또는 문자열 배열이다. */
+function audience(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    return clamp(value.filter((item): item is string => typeof item === 'string').join(', ') || null);
+  }
+
+  return clamp(str(value));
+}
+
+function expiresAt(value: unknown): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+
+  const date = new Date(value * 1000);
+
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/**
+ * 신원 토큰에서 프로필을 뽑는다.
+ * Docker Manager 의 X-Forwarded-Identity 를 우선하고, 없으면 v1 id_token 계열을 본다.
+ */
+function readProfile(source: Headers): IdentityProfile | null {
+  const identity = first(source, HEADER_NAMES.identity);
+  const raw = identity ?? first(source, HEADER_NAMES.idToken);
 
   if (!raw) return null;
 
@@ -247,11 +304,16 @@ function readProfile(source: Headers): GoogleProfile | null {
   if (!claims) return null;
 
   return {
+    source: identity ? 'docker-manager' : 'id_token',
     name: clamp(str(claims.name)),
     givenName: clamp(str(claims.given_name)),
     familyName: clamp(str(claims.family_name)),
     picture: safePictureUrl(claims.picture),
+    role: clamp(str(claims.role)),
     subject: clamp(str(claims.sub)),
+    issuer: clamp(str(claims.iss)),
+    audience: audience(claims.aud),
+    expiresAt: expiresAt(claims.exp),
   };
 }
 
@@ -285,8 +347,8 @@ export function readProxyUser(source: Headers): ProxyUser | null {
 /**
  * 화면에 쓸 이름을 고른다.
  *
- * X-Forwarded-User 는 경로에 따라 값이 다르다. Docker Manager 자체 로그인에서는
- * 사람 이름이지만 oauth2-proxy 의 Google provider 에서는 sub(숫자 문자열)이므로,
+ * X-Forwarded-User 는 경로에 따라 값이 다르다. Docker Manager v2 에서는
+ * 사람 이름이지만 v1 oauth2-proxy 의 Google provider 에서는 sub(숫자 문자열)이므로,
  * 숫자만으로 된 값은 이름으로 쓰지 않는다.
  */
 export function displayName(user: ProxyUser): string {
@@ -310,7 +372,7 @@ export async function getProxyUser(): Promise<ProxyUser | null> {
 
 /**
  * 실제로 도착한 인증 관련 헤더 원문. 프록시 설정을 점검할 때 쓴다.
- * Cookie / Authorization 은 값이 그대로 자격증명이라 의도적으로 뺐다.
+ * Cookie / Authorization / X-Forwarded-Identity 는 값이 그대로 자격증명이라 의도적으로 뺐다.
  */
 export async function getAuthHeaders(): Promise<Record<string, string>> {
   const source = await headers();

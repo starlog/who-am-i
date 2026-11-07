@@ -2,7 +2,7 @@ import { apiUrl } from '@/lib/api';
 import { displayName, getAuthHeaders, getProxyUser } from '@/lib/auth';
 
 /**
- * 프록시(oauth2-proxy)가 넘겨준 로그인 정보를 그대로 보여준다.
+ * 프록시(Docker Manager 인증 게이트)가 넘겨준 로그인 정보를 그대로 보여준다.
  *
  * headers() 를 호출하므로 이 페이지는 매 요청 서버에서 렌더링된다
  * (정적 프리렌더링 대상에서 자동으로 빠진다).
@@ -19,7 +19,7 @@ export default async function Home() {
             Who am I
           </h1>
           <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-            앞단 oauth2-proxy 가 요청 헤더로 전달한 로그인 정보입니다.
+            앞단 Docker Manager 인증 게이트가 요청 헤더로 전달한 로그인 정보입니다.
           </p>
         </header>
 
@@ -51,25 +51,48 @@ export default async function Home() {
 
               <dl className="mt-6 grid grid-cols-[9rem_1fr] gap-x-4 gap-y-2 border-t border-black/10 pt-5 text-sm dark:border-white/10">
                 <Row label="이메일" value={user.email} />
-                <Row label="이름 (id_token)" value={user.profile?.name ?? null} />
-                <Row label="preferred_username" value={user.preferredUsername} />
                 <Row label="X-Forwarded-User" value={user.user} />
-                <Row label="구글 고유 ID (sub)" value={user.profile?.subject ?? null} />
+                <Row label="preferred_username" value={user.preferredUsername} />
                 <Row label="그룹" value={user.groups.length > 0 ? user.groups.join(', ') : null} />
               </dl>
 
-              {!user.profile && (
+              {user.profile ? (
+                <dl className="mt-5 grid grid-cols-[9rem_1fr] gap-x-4 gap-y-2 border-t border-black/10 pt-5 text-sm dark:border-white/10">
+                  <Row
+                    label="토큰 출처"
+                    value={
+                      user.profile.source === 'docker-manager'
+                        ? 'X-Forwarded-Identity (Docker Manager)'
+                        : 'id_token (oauth2-proxy)'
+                    }
+                  />
+                  <Row label="이름" value={user.profile.name} />
+                  {user.profile.source === 'id_token' && (
+                    <>
+                      <Row label="given_name" value={user.profile.givenName} />
+                      <Row label="family_name" value={user.profile.familyName} />
+                    </>
+                  )}
+                  <Row label="역할 (role)" value={user.profile.role} />
+                  <Row
+                    label={user.profile.source === 'docker-manager' ? '사용자 ID (sub)' : '구글 고유 ID (sub)'}
+                    value={user.profile.subject}
+                  />
+                  <Row label="발급자 (iss)" value={user.profile.issuer} />
+                  <Row label="대상 (aud)" value={user.profile.audience} />
+                  <Row label="만료 (exp)" value={user.profile.expiresAt} />
+                </dl>
+              ) : (
                 <p className="mt-5 rounded-md bg-black/[.04] p-3 text-xs leading-relaxed text-zinc-600 dark:bg-white/[.06] dark:text-zinc-400">
-                  이름·프로필 사진은 id_token 에서 나옵니다. 지금은 토큰이 전달되지 않고
-                  있습니다. oauth2-proxy 에{' '}
-                  <code className="font-mono">set-authorization-header</code> 를 켜고 nginx 가 그
-                  값을 넘기도록 설정해야 합니다 (README 참고).
+                  프로필 사진·역할은 신원 토큰에서 나옵니다. 지금은 토큰이 전달되지 않고
+                  있습니다. Docker Manager 관리자 화면에서 이 프로젝트의 신원 전달
+                  (<code className="font-mono">pass_identity</code>)을 켜야 합니다 (README 참고).
                 </p>
               )}
             </>
           ) : (
             <p className="rounded-md border border-dashed border-black/15 px-3 py-10 text-center text-sm text-zinc-500 dark:border-white/20">
-              인증 헤더가 없습니다. 프록시(nginx + oauth2-proxy)를 거치지 않은 요청이거나, 해당
+              인증 헤더가 없습니다. 프록시(nginx + Docker Manager 인증 게이트)를 거치지 않은 요청이거나, 해당
               프로젝트가 <code className="font-mono">skip_auth=1</code> 로 설정되어 인증 게이트를
               지나지 않는 경우입니다.
             </p>
@@ -94,7 +117,8 @@ export default async function Home() {
           )}
 
           <p className="mt-5 text-xs leading-relaxed text-zinc-500">
-            Cookie · Authorization(id_token) 헤더는 값 자체가 자격증명이므로 표시하지 않습니다.
+            Cookie · X-Forwarded-Identity · Authorization 헤더는 값 자체가 자격증명이므로 표시하지
+            않습니다.
             JSON 이 필요하면 <code className="font-mono">{apiUrl('/api/me')}</code> 를 호출하세요.
           </p>
         </section>

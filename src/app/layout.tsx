@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: 'Who am I',
-  description: 'oauth2-proxy 가 전달한 로그인 사용자 정보 확인',
+  description: 'Docker Manager 인증 게이트가 전달한 로그인 사용자 정보 확인',
 };
 
 export default function RootLayout({ children }: LayoutProps<'/'>) {
